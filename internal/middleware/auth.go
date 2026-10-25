@@ -43,6 +43,11 @@ type UserProvisioner interface {
 	EnsureUser(ctx context.Context, keycloakSub string) (int64, error)
 }
 
+// ErrorWriter は、エラー応答(401・500・503)を Problem Details で書き出す関数。
+// この層は handler 層を import しない(handler がこの層の Principal を読むため、import すると循環する)。
+// 組み立て側が、handler の書出関数(handler.WriteStatusProblem)を渡す。
+type ErrorWriter func(w http.ResponseWriter, r *http.Request, status int, detail string)
+
 // AuthConfig は、認証ミドルウェアの設定。
 type AuthConfig struct {
 	// Issuer は、トークンの iss と完全一致させる値(APP_KEYCLOAK_ISSUER)。
@@ -51,10 +56,6 @@ type AuthConfig struct {
 	JWKSURL string
 	// Audience は、トークンの aud が含むべき値(APP_JWT_AUDIENCE)。
 	Audience string
-	// WriteProblem は、401・500・503 を Problem Details で返す関数。
-	// この層は handler 層に依存しない(handler がこの層の Principal を読むため、依存すると循環する)ので、
-	// 組み立て側が handler.WriteStatusProblem を渡す。省けない。
-	WriteProblem func(w http.ResponseWriter, r *http.Request, status int, detail string)
 
 	// HTTPClient は、JWKS の取得に使う。省くと、待ち時間に上限を付けた既定のものを使う。
 	HTTPClient *http.Client
@@ -66,17 +67,18 @@ type AuthConfig struct {
 type Auth struct {
 	cfg    AuthConfig
 	users  UserProvisioner
+	write  ErrorWriter
 	logger *slog.Logger
 	jwks   *jwksCache
 	parser *jwt.Parser
 }
 
 // NewAuth は、認証ミドルウェアを作る。JWKS は、最初に必要になるまで取りに行かない。
-// Issuer・JWKSURL・Audience・WriteProblem のどれかが空なら panic する。
+// Issuer・JWKSURL・Audience が空、または users・write が無ければ panic する。
 // 空の iss は検証を飛ばす意味になってしまい、気づかず通すのを避けるため、起動時に止める。
-func NewAuth(cfg AuthConfig, users UserProvisioner, logger *slog.Logger) *Auth {
-	if cfg.Issuer == "" || cfg.JWKSURL == "" || cfg.Audience == "" || cfg.WriteProblem == nil || users == nil {
-		panic("middleware: NewAuth requires Issuer, JWKSURL, Audience, WriteProblem and a UserProvisioner")
+func NewAuth(cfg AuthConfig, users UserProvisioner, write ErrorWriter, logger *slog.Logger) *Auth {
+	if cfg.Issuer == "" || cfg.JWKSURL == "" || cfg.Audience == "" || users == nil || write == nil {
+		panic("middleware: NewAuth requires Issuer, JWKSURL, Audience, a UserProvisioner and an ErrorWriter")
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: authHTTPTimeout}
@@ -90,6 +92,7 @@ func NewAuth(cfg AuthConfig, users UserProvisioner, logger *slog.Logger) *Auth {
 	return &Auth{
 		cfg:    cfg,
 		users:  users,
+		write:  write,
 		logger: logger,
 		jwks:   newJWKSCache(cfg.JWKSURL, cfg.HTTPClient, cfg.Now),
 		parser: jwt.NewParser(
@@ -124,7 +127,7 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 			var unavailable *jwksUnavailableError
 			if errors.As(err, &unavailable) {
 				log.Error("jwks unavailable", "code", unavailable.code)
-				a.cfg.WriteProblem(w, r, http.StatusServiceUnavailable, "")
+				a.write(w, r, http.StatusServiceUnavailable, "")
 				return
 			}
 			a.unauthorized(w, r, log, failureCode(err))
@@ -136,19 +139,19 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 		if err != nil {
 			// 失敗の中身(DB のエラー文など)は出さない。原因は usecase 側のログで追う。
 			log.Error("ensure user failed", "sub", sub)
-			a.cfg.WriteProblem(w, r, http.StatusInternalServerError, "")
+			a.write(w, r, http.StatusInternalServerError, "")
 			return
 		}
 
 		p := Principal{Sub: sub, UserID: userID, IsAdmin: hasAdminRole(claims)}
-		next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), p)))
+		next.ServeHTTP(w, r.WithContext(ContextWithPrincipal(r.Context(), p)))
 	})
 }
 
 func (a *Auth) unauthorized(w http.ResponseWriter, r *http.Request, log *slog.Logger, code string) {
 	log.Info("unauthorized", "code", code)
-	w.Header().Set("WWW-Authenticate", "Bearer") // WriteProblem がヘッダを確定させる前に設定する
-	a.cfg.WriteProblem(w, r, http.StatusUnauthorized, "")
+	w.Header().Set("WWW-Authenticate", "Bearer") // write がヘッダを確定させる前に設定する
+	a.write(w, r, http.StatusUnauthorized, "")
 }
 
 // bearerToken は、Authorization ヘッダから Bearer トークンを取り出す。

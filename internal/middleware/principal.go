@@ -21,11 +21,6 @@ func ContextWithPrincipal(ctx context.Context, p Principal) context.Context {
 	return context.WithValue(ctx, principalKey{}, p)
 }
 
-// withPrincipal は ContextWithPrincipal の別名(auth.go が使っている間だけ残す)。
-func withPrincipal(ctx context.Context, p Principal) context.Context {
-	return ContextWithPrincipal(ctx, p)
-}
-
 // PrincipalFrom は、context に入った Principal を返す。認証を通っていなければ false。
 func PrincipalFrom(ctx context.Context) (Principal, bool) {
 	p, ok := ctx.Value(principalKey{}).(Principal)

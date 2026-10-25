@@ -1,8 +1,9 @@
 package middleware_test
 
 // 認証ミドルウェアの試験。鍵は試験内で生成し、JWKS は httptest で立てる(Keycloak も docker も使わない)。
-// 外部試験パッケージにしているのは、本物の handler.WriteStatusProblem をつないで 401・500・503 の
-// 本文まで確かめるため(内部試験だと、handler がこの層を読む形になったとき import が循環する)。
+// この層は internal/handler を import しない(handler がこの層の Principal を読むため循環する)。
+// エラー応答の書出関数は差込口(ErrorWriter)から渡すので、試験では handler.WriteStatusProblem と同じ形を返す
+// fake を使い、401・500・503 の status・ヘッダ・本文の形を確かめる。
 
 import (
 	"bytes"
@@ -14,9 +15,12 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"go/parser"
+	"go/token"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,9 +29,11 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/shun2580/time-slot-reservation-api/internal/handler"
 	"github.com/shun2580/time-slot-reservation-api/internal/middleware"
 )
+
+// contentTypeProblem は、Problem Details の Content-Type(handler 層の定数と同じ値)。
+const contentTypeProblem = "application/problem+json"
 
 const (
 	testIssuer   = "http://localhost:8081/realms/slotres"
@@ -58,6 +64,23 @@ func testKeys(t *testing.T) (a, b *rsa.PrivateKey) {
 		}
 	})
 	return keyA, keyB
+}
+
+// ---- エラー書出の fake ----
+
+// writeProblem は、handler.WriteStatusProblem と同じ形(type=about:blank・title=HTTP の理由句・
+// status・instance)の Problem Details を書く fake。
+func writeProblem(w http.ResponseWriter, r *http.Request, status int, detail string) {
+	body, _ := json.Marshal(map[string]any{
+		"type":     "about:blank",
+		"title":    http.StatusText(status),
+		"status":   status,
+		"detail":   detail,
+		"instance": r.URL.Path,
+	})
+	w.Header().Set("Content-Type", contentTypeProblem)
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }
 
 // ---- 時計 ----
@@ -244,13 +267,12 @@ func newEnv(t *testing.T) *testEnv {
 // build は、認証ミドルウェアを(JWKS の URL などを変えずに)作り直す。
 func (e *testEnv) build() {
 	e.auth = middleware.NewAuth(middleware.AuthConfig{
-		Issuer:       testIssuer,
-		JWKSURL:      e.jwks.srv.URL,
-		Audience:     testAudience,
-		WriteProblem: handler.WriteStatusProblem,
-		HTTPClient:   e.jwks.srv.Client(),
-		Now:          e.clock.Now,
-	}, e.users, slog.New(slog.NewJSONHandler(e.logs, nil)))
+		Issuer:     testIssuer,
+		JWKSURL:    e.jwks.srv.URL,
+		Audience:   testAudience,
+		HTTPClient: e.jwks.srv.Client(),
+		Now:        e.clock.Now,
+	}, e.users, writeProblem, slog.New(slog.NewJSONHandler(e.logs, nil)))
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.nextN.Add(1)
@@ -343,8 +365,8 @@ type problemBody struct {
 
 func decodeProblem(t *testing.T, rec *httptest.ResponseRecorder) problemBody {
 	t.Helper()
-	if ct := rec.Header().Get("Content-Type"); ct != handler.ContentTypeProblem {
-		t.Fatalf("Content-Type = %q, want %q", ct, handler.ContentTypeProblem)
+	if ct := rec.Header().Get("Content-Type"); ct != contentTypeProblem {
+		t.Fatalf("Content-Type = %q, want %q", ct, contentTypeProblem)
 	}
 	var p problemBody
 	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
@@ -938,35 +960,32 @@ func TestAuth_LogsCodesNotSecrets(t *testing.T) {
 // ---- 構成 ----
 
 func TestNewAuth_PanicsOnIncompleteConfig(t *testing.T) {
-	base := middleware.AuthConfig{Issuer: testIssuer, JWKSURL: "http://jwks.invalid/certs", Audience: testAudience, WriteProblem: handler.WriteStatusProblem}
-	cases := map[string]func(c *middleware.AuthConfig){
-		"Issuer 空":        func(c *middleware.AuthConfig) { c.Issuer = "" },
-		"JWKSURL 空":       func(c *middleware.AuthConfig) { c.JWKSURL = "" },
-		"Audience 空":      func(c *middleware.AuthConfig) { c.Audience = "" },
-		"WriteProblem 無し": func(c *middleware.AuthConfig) { c.WriteProblem = nil },
-	}
-	for name, mutate := range cases {
-		t.Run(name, func(t *testing.T) {
-			cfg := base
-			mutate(&cfg)
-			defer func() {
-				if recover() == nil {
-					t.Error("NewAuth did not panic")
-				}
-			}()
-			middleware.NewAuth(cfg, &fakeUsers{}, slog.Default())
-		})
-	}
-	t.Run("UserProvisioner 無し", func(t *testing.T) {
+	base := middleware.AuthConfig{Issuer: testIssuer, JWKSURL: "http://jwks.invalid/certs", Audience: testAudience}
+	mustPanic := func(t *testing.T, cfg middleware.AuthConfig, users middleware.UserProvisioner, write middleware.ErrorWriter) {
+		t.Helper()
 		defer func() {
 			if recover() == nil {
 				t.Error("NewAuth did not panic")
 			}
 		}()
-		middleware.NewAuth(base, nil, slog.Default())
-	})
-	t.Run("省略できる項目(HTTPClient・Now・logger)は省いてよい", func(t *testing.T) {
-		if middleware.NewAuth(base, &fakeUsers{}, nil) == nil {
+		middleware.NewAuth(cfg, users, write, slog.Default())
+	}
+	cases := map[string]func(c *middleware.AuthConfig){
+		"Issuer 空":   func(c *middleware.AuthConfig) { c.Issuer = "" },
+		"JWKSURL 空":  func(c *middleware.AuthConfig) { c.JWKSURL = "" },
+		"Audience 空": func(c *middleware.AuthConfig) { c.Audience = "" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := base
+			mutate(&cfg)
+			mustPanic(t, cfg, &fakeUsers{}, writeProblem)
+		})
+	}
+	t.Run("UserProvisioner 無し", func(t *testing.T) { mustPanic(t, base, nil, writeProblem) })
+	t.Run("ErrorWriter 無し", func(t *testing.T) { mustPanic(t, base, &fakeUsers{}, nil) })
+	t.Run("省ける項目(HTTPClient・Now・logger)は省いてよい", func(t *testing.T) {
+		if middleware.NewAuth(base, &fakeUsers{}, writeProblem, nil) == nil {
 			t.Error("NewAuth returned nil")
 		}
 	})
@@ -975,5 +994,54 @@ func TestNewAuth_PanicsOnIncompleteConfig(t *testing.T) {
 func TestPrincipalFrom_EmptyContext(t *testing.T) {
 	if p, ok := middleware.PrincipalFrom(context.Background()); ok || p != (middleware.Principal{}) {
 		t.Errorf("PrincipalFrom(empty) = %+v, %v; want zero, false", p, ok)
+	}
+}
+
+func TestContextWithPrincipal_RoundTrip(t *testing.T) {
+	want := middleware.Principal{Sub: "s", UserID: 7, IsAdmin: true}
+	got, ok := middleware.PrincipalFrom(middleware.ContextWithPrincipal(context.Background(), want))
+	if !ok || got != want {
+		t.Errorf("PrincipalFrom = %+v, %v; want %+v, true", got, ok, want)
+	}
+}
+
+// 401 の WWW-Authenticate は、ErrorWriter を呼ぶ前に設定されていなければならない(書き始めた後では付けられない)。
+func TestAuth_WWWAuthenticateIsSetBeforeErrorWriterRuns(t *testing.T) {
+	e := newEnv(t)
+	var atWrite string
+	var gotStatus int
+	e.auth = middleware.NewAuth(middleware.AuthConfig{
+		Issuer: testIssuer, JWKSURL: e.jwks.srv.URL, Audience: testAudience,
+		HTTPClient: e.jwks.srv.Client(), Now: e.clock.Now,
+	}, e.users, func(w http.ResponseWriter, r *http.Request, status int, detail string) {
+		atWrite = w.Header().Get("WWW-Authenticate")
+		gotStatus = status
+		writeProblem(w, r, status, detail)
+	}, slog.New(slog.NewJSONHandler(e.logs, nil)))
+	e.handle = e.auth.Middleware(http.NotFoundHandler())
+
+	e.requireUnauthorized(e.callToken("garbage"))
+	if gotStatus != http.StatusUnauthorized || atWrite != "Bearer" {
+		t.Errorf("at ErrorWriter: status=%d WWW-Authenticate=%q; want 401 and Bearer", gotStatus, atWrite)
+	}
+}
+
+// この層は handler 層を import しない(循環を避ける。家老の訂正)。本体のファイルの import を調べる。
+func TestMiddlewarePackageDoesNotImportHandler(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("glob: %v, %d files", err, len(files))
+	}
+	fset := token.NewFileSet()
+	for _, f := range files {
+		af, err := parser.ParseFile(fset, f, nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parse %s: %v", f, err)
+		}
+		for _, imp := range af.Imports {
+			if strings.HasSuffix(strings.Trim(imp.Path.Value, `"`), "/internal/handler") {
+				t.Errorf("%s imports internal/handler", f)
+			}
+		}
 	}
 }
