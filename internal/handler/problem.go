@@ -20,6 +20,14 @@ type Problem struct {
 	Status   int    `json:"status"`
 	Detail   string `json:"detail,omitempty"`
 	Instance string `json:"instance,omitempty"`
+	// Errors は、入力の誤りの詳細。validation-error のときだけ使う。空・nil なら JSON に出さない。
+	Errors []FieldError `json:"errors,omitempty"`
+}
+
+// FieldError は、入力の誤り1件。Field は誤った項目名、Message はその説明。
+type FieldError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
 }
 
 // ProblemKind は、業務エラーの種類(type と status の組)。
@@ -65,6 +73,13 @@ func BusinessProblemKinds() []ProblemKind {
 // WriteProblem は、業務エラーを Problem Details で返す。detail は空でもよい。
 func WriteProblem(w http.ResponseWriter, r *http.Request, kind ProblemKind, detail string) {
 	writeProblem(w, r, Problem{Type: kind.Type, Title: kind.Title, Status: kind.Status, Detail: detail})
+}
+
+// WriteValidationProblem は、入力の誤りを validation-error(400)の Problem Details で返す。
+// errs は errors[] にそのまま出す。空・nil なら errors キーは出さない。
+func WriteValidationProblem(w http.ResponseWriter, r *http.Request, errs []FieldError) {
+	k := ProblemValidationError
+	writeProblem(w, r, Problem{Type: k.Type, Title: k.Title, Status: k.Status, Errors: errs})
 }
 
 // WriteStatusProblem は、業務エラー以外(401・403・404・500・501 など)を Problem Details で返す。

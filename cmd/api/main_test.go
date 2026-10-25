@@ -135,3 +135,50 @@ func TestRun_gracefulShutdownOnContextCancel(t *testing.T) {
 		t.Fatal("ctx を取り消しても run が戻らない")
 	}
 }
+
+func TestNewServer_hasTimeouts(t *testing.T) {
+	srv := newServer(http.NotFoundHandler())
+	checks := []struct {
+		name string
+		got  time.Duration
+		want time.Duration
+	}{
+		{"ReadHeaderTimeout", srv.ReadHeaderTimeout, 10 * time.Second},
+		{"ReadTimeout", srv.ReadTimeout, 10 * time.Second},
+		{"WriteTimeout", srv.WriteTimeout, 30 * time.Second},
+		{"IdleTimeout", srv.IdleTimeout, 120 * time.Second},
+	}
+	for _, c := range checks {
+		if c.got <= 0 {
+			t.Errorf("%s が未設定", c.name)
+		}
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+	if srv.Handler == nil {
+		t.Error("Handler が未設定")
+	}
+}
+
+func TestBuildRoutes_healthzPublicAnd405(t *testing.T) {
+	h, err := buildRoutes()
+	if err != nil {
+		t.Fatalf("buildRoutes: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusOK {
+		t.Errorf("GET /healthz = %d, want 200", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/healthz", nil))
+	if rr.Code != http.StatusMethodNotAllowed || rr.Header().Get("Allow") != "GET, HEAD" {
+		t.Errorf("POST /healthz = %d Allow=%q, want 405 \"GET, HEAD\"", rr.Code, rr.Header().Get("Allow"))
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/nope", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("GET /nope = %d, want 404", rr.Code)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -145,5 +146,55 @@ func TestInternalServerError_hidesInternals(t *testing.T) {
 	m := decodeProblem(t, rr)
 	if _, ok := m["detail"]; ok {
 		t.Errorf("500 の本文に detail を出してはならない: %v", m)
+	}
+}
+
+func TestWriteValidationProblem_errors(t *testing.T) {
+	rr := httptest.NewRecorder()
+	WriteValidationProblem(rr, httptest.NewRequest(http.MethodPost, "/slots", nil), []FieldError{
+		{Field: "capacity", Message: "1以上にしてください"},
+		{Field: "starts_at", Message: "必須です"},
+	})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/problem+json" {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	m := decodeProblem(t, rr)
+	if m["type"] != "/problems/validation-error" || m["status"] != float64(400) {
+		t.Errorf("本文が違う: %v", m)
+	}
+	errs, ok := m["errors"].([]any)
+	if !ok || len(errs) != 2 {
+		t.Fatalf("errors が2件の配列のはず: %v", m["errors"])
+	}
+	first, _ := errs[0].(map[string]any)
+	if first["field"] != "capacity" || first["message"] != "1以上にしてください" || len(first) != 2 {
+		t.Errorf("errors[0] が違う: %v", first)
+	}
+}
+
+func TestWriteValidationProblem_emptyErrorsOmitted(t *testing.T) {
+	for name, errs := range map[string][]FieldError{"nil": nil, "empty": {}} {
+		rr := httptest.NewRecorder()
+		WriteValidationProblem(rr, httptest.NewRequest(http.MethodPost, "/slots", nil), errs)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", name, rr.Code)
+		}
+		if m := decodeProblem(t, rr); m["errors"] != nil {
+			t.Errorf("%s: errors キーを出してはならない: %v", name, m)
+		}
+		if strings.Contains(rr.Body.String(), `"errors"`) {
+			t.Errorf("%s: 本文に errors が含まれる: %s", name, rr.Body.String())
+		}
+	}
+}
+
+func TestWriteStatusProblem_neverHasErrors(t *testing.T) {
+	rr := httptest.NewRecorder()
+	WriteStatusProblem(rr, httptest.NewRequest(http.MethodGet, "/x", nil), http.StatusNotFound, "")
+	if strings.Contains(rr.Body.String(), `"errors"`) {
+		t.Errorf("validation-error 以外に errors を出してはならない: %s", rr.Body.String())
 	}
 }

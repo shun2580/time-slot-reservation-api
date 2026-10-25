@@ -18,8 +18,12 @@ import (
 	"github.com/shun2580/time-slot-reservation-api/internal/middleware"
 )
 
+// http.Server のタイムアウト。遅い・止まった接続でゴルーチンと接続を占有されないための上限。
 const (
-	readHeaderTimeout = 10 * time.Second
+	readHeaderTimeout = 10 * time.Second  // ヘッダを読み切るまで(slowloris 対策)
+	readTimeout       = 10 * time.Second  // 本文を含む要求全体を読み切るまで。本APIの本文は小さなJSONだけ
+	writeTimeout      = 30 * time.Second  // 応答を書き切るまで。DB 待ちを含む処理の上限
+	idleTimeout       = 120 * time.Second // keep-alive の接続を次の要求まで保つ上限
 	shutdownTimeout   = 10 * time.Second
 )
 
@@ -54,10 +58,7 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		return err
 	}
 
-	srv := &http.Server{
-		Handler:           buildHandler(routes, logger),
-		ReadHeaderTimeout: readHeaderTimeout,
-	}
+	srv := newServer(buildHandler(routes, logger))
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
@@ -80,6 +81,17 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	}
 	logger.Info("サーバーを停止した")
 	return nil
+}
+
+// newServer は、タイムアウトを設定した http.Server を返す。
+func newServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
 }
 
 // buildRoutes は、全ルートを登録して http.Handler に組み上げる。
