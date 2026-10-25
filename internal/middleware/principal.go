@@ -15,8 +15,15 @@ type Principal struct {
 // principalKey は、context に Principal を入れる鍵。他の鍵(ctxKey)と型で分ける。
 type principalKey struct{}
 
-func withPrincipal(ctx context.Context, p Principal) context.Context {
+// ContextWithPrincipal は、Principal を入れた context を返す。認証ミドルウェアが使うほか、
+// 認証を通った状態を作りたい handler の試験が使う。
+func ContextWithPrincipal(ctx context.Context, p Principal) context.Context {
 	return context.WithValue(ctx, principalKey{}, p)
+}
+
+// withPrincipal は ContextWithPrincipal の別名(auth.go が使っている間だけ残す)。
+func withPrincipal(ctx context.Context, p Principal) context.Context {
+	return ContextWithPrincipal(ctx, p)
 }
 
 // PrincipalFrom は、context に入った Principal を返す。認証を通っていなければ false。
