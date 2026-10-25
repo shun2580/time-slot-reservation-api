@@ -5,10 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-)
 
-// jst は日本標準時。日本は夏時間が無いので固定オフセットで足り、tzdata の有無にも依らない。
-var jst = time.FixedZone("JST", 9*60*60)
+	"github.com/shun2580/time-slot-reservation-api/internal/entity"
+)
 
 // UserRepository は users 表への永続化を担う。
 type UserRepository struct {
@@ -32,7 +31,7 @@ func NewUserRepository(db *sql.DB, now func() time.Time) *UserRepository {
 // 既存行のときは ON DUPLICATE KEY UPDATE の LAST_INSERT_ID(id) で、その行の id を LastInsertId に載せる。
 // id を自分自身に代入するだけなので、既存行の created_at・updated_at は変わらない。
 func (r *UserRepository) EnsureUser(ctx context.Context, keycloakSub string) (int64, error) {
-	at := r.now().In(jst)
+	at := r.now().In(entity.JST)
 	res, err := r.db.ExecContext(ctx,
 		`INSERT INTO users (keycloak_sub, created_at, updated_at) VALUES (?, ?, ?)
 ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,

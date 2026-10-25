@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shun2580/time-slot-reservation-api/internal/entity"
 	"github.com/shun2580/time-slot-reservation-api/internal/repository/repotest"
 	"github.com/shun2580/time-slot-reservation-api/internal/usecase"
 )
@@ -138,11 +139,11 @@ func TestUserRepository_EnsureUser(t *testing.T) {
 	t.Run("nowを差さなくても現在時刻がJSTで入る", func(t *testing.T) {
 		repotest.Reset(t, db)
 		def := NewUserRepository(db, nil)
-		lo := time.Now().In(jst).Add(-2 * time.Second).Truncate(time.Second)
+		lo := time.Now().In(entity.JST).Add(-2 * time.Second).Truncate(time.Second)
 		if _, err := def.EnsureUser(ctx, "sub-now"); err != nil {
 			t.Fatalf("EnsureUser: %v", err)
 		}
-		hi := time.Now().In(jst).Add(2 * time.Second)
+		hi := time.Now().In(entity.JST).Add(2 * time.Second)
 
 		var created time.Time
 		if err := db.QueryRowContext(ctx, "SELECT created_at FROM users WHERE keycloak_sub = 'sub-now'").Scan(&created); err != nil {
