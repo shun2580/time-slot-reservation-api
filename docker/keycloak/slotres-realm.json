@@ -1,0 +1,84 @@
+{
+  "realm": "slotres",
+  "displayName": "slotres (開発専用)",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "roles": {
+    "realm": [
+      {
+        "name": "admin",
+        "description": "枠の作成・公開・変更・閉じる・削除、代理取消ができる管理者"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "slot-api-client",
+      "name": "slot-api-client",
+      "description": "開発専用の公開クライアント。directAccessGrants(パスワード直接付与)を有効にしてあり、.http からトークンを得るためだけに使う。本番では使わぬこと。",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "defaultClientScopes": ["web-origins", "acr", "roles", "profile", "email", "basic"],
+      "optionalClientScopes": [],
+      "protocolMappers": [
+        {
+          "name": "slot-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "slot-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "user1",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "user1@example.test",
+      "firstName": "User",
+      "lastName": "One",
+      "credentials": [
+        { "type": "password", "value": "${SLOTRES_USER1_PASSWORD}", "temporary": false }
+      ]
+    },
+    {
+      "username": "user2",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "user2@example.test",
+      "firstName": "User",
+      "lastName": "Two",
+      "credentials": [
+        { "type": "password", "value": "${SLOTRES_USER2_PASSWORD}", "temporary": false }
+      ]
+    },
+    {
+      "username": "admin1",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "admin1@example.test",
+      "firstName": "Admin",
+      "lastName": "One",
+      "realmRoles": ["admin"],
+      "credentials": [
+        { "type": "password", "value": "${SLOTRES_ADMIN1_PASSWORD}", "temporary": false }
+      ]
+    }
+  ]
+}

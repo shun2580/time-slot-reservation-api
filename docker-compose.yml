@@ -1,0 +1,120 @@
+# 開発用の Docker Compose(第1段階: api / mysql / keycloak / migrate)。
+# 値は .env から受ける(.env.example をコピーして作る。.env は追跡外)。
+# 画像の版は固定している。上げるときは、タグの実在を確かめてから書き換えること。
+name: time-slot-reservation-api
+
+services:
+  mysql:
+    image: mysql:8.4.7
+    environment:
+      TZ: Asia/Tokyo
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?.env に MYSQL_ROOT_PASSWORD を書くこと}
+      MYSQL_DATABASE: ${APP_DB_NAME:?.env に APP_DB_NAME を書くこと}
+      MYSQL_USER: ${APP_DB_USER:?.env に APP_DB_USER を書くこと}
+      MYSQL_PASSWORD: ${APP_DB_PASSWORD:?.env に APP_DB_PASSWORD を書くこと}
+    # 時刻は全て JST にそろえる(仕様「時刻」)。utf8mb4 を既定にする。
+    command:
+      - --default-time-zone=+09:00
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    ports:
+      # 手元の DB クライアント用。ホストの 3306 と衝突せぬよう 3307、外部には公開せぬよう 127.0.0.1 のみ。
+      - "127.0.0.1:3307:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      # 初期化中の一時サーバーは TCP を聞かぬので、-h 127.0.0.1 で本起動を待てる。
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  migrate:
+    # golang-migrate の一回限りのコンテナ。mysql が healthy になってから migrations/ を当てて終わる。
+    image: migrate/migrate:v4.18.3
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Tokyo
+    volumes:
+      - ./migrations:/migrations:ro
+    # パスワードは URL の一部になる。記号(@ : / ? # %)を含めぬこと(.env.example に注記)。
+    command:
+      - -path=/migrations
+      - -database
+      - mysql://${APP_DB_USER}:${APP_DB_PASSWORD}@tcp(${APP_DB_HOST}:${APP_DB_PORT})/${APP_DB_NAME}?multiStatements=true
+      - up
+    restart: "no"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.0
+    # 開発専用の起動(start-dev)。realm は初回起動時に取り込む(--import-realm)。
+    command: ["start-dev", "--import-realm"]
+    environment:
+      TZ: Asia/Tokyo
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?.env に KC_BOOTSTRAP_ADMIN_USERNAME を書くこと}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?.env に KC_BOOTSTRAP_ADMIN_PASSWORD を書くこと}
+      # iss を利用者がトークンを得る外部名に固定する。
+      # API は内部名(keycloak:8080)で JWKS を取るが、トークンの iss は APP_KEYCLOAK_ISSUER(http://localhost:8081/...)と一致させる。
+      # ここを変えるときは .env の APP_KEYCLOAK_ISSUER も同じ origin に直すこと。
+      KC_HOSTNAME: http://localhost:8081
+      KC_HTTP_ENABLED: "true"
+      # healthcheck 用に管理ポート(9000)の /health を有効にする。
+      KC_HEALTH_ENABLED: "true"
+      # realm JSON の ${...} を取り込み時に置き換える値(平文を JSON に書かぬため)。
+      SLOTRES_USER1_PASSWORD: ${SLOTRES_USER1_PASSWORD:?.env に SLOTRES_USER1_PASSWORD を書くこと}
+      SLOTRES_USER2_PASSWORD: ${SLOTRES_USER2_PASSWORD:?.env に SLOTRES_USER2_PASSWORD を書くこと}
+      SLOTRES_ADMIN1_PASSWORD: ${SLOTRES_ADMIN1_PASSWORD:?.env に SLOTRES_ADMIN1_PASSWORD を書くこと}
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./docker/keycloak/slotres-realm.json:/opt/keycloak/data/import/slotres-realm.json:ro
+    healthcheck:
+      # keycloak の画像に curl は無い。bash の /dev/tcp で管理ポートの /health/ready を叩く。
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000
+          && printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+          && resp=$$(cat <&3)
+          && [[ "$$resp" == *'"UP"'* ]]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Tokyo
+      APP_HTTP_ADDR: ${APP_HTTP_ADDR:?.env に APP_HTTP_ADDR を書くこと}
+      APP_DB_HOST: ${APP_DB_HOST:?.env に APP_DB_HOST を書くこと}
+      APP_DB_PORT: ${APP_DB_PORT:?.env に APP_DB_PORT を書くこと}
+      APP_DB_USER: ${APP_DB_USER:?.env に APP_DB_USER を書くこと}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?.env に APP_DB_PASSWORD を書くこと}
+      APP_DB_NAME: ${APP_DB_NAME:?.env に APP_DB_NAME を書くこと}
+      APP_KEYCLOAK_ISSUER: ${APP_KEYCLOAK_ISSUER:?.env に APP_KEYCLOAK_ISSUER を書くこと}
+      APP_KEYCLOAK_JWKS_URL: ${APP_KEYCLOAK_JWKS_URL:?.env に APP_KEYCLOAK_JWKS_URL を書くこと}
+      APP_JWT_AUDIENCE: ${APP_JWT_AUDIENCE:?.env に APP_JWT_AUDIENCE を書くこと}
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  mysql-data:

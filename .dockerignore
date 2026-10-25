@@ -1,0 +1,22 @@
+.git
+.gitignore
+.dockerignore
+
+# 秘密(.env は画像に入れぬ)
+.env
+.env.*
+
+# 画像に要らぬもの
+docs
+docker
+docker-compose.yml
+Dockerfile
+README.md
+*.md
+.idea
+.vscode
+bin
+tmp
+coverage.*
+*.test
+*.out
