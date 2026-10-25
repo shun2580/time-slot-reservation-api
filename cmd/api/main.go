@@ -49,8 +49,13 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 		return err
 	}
 
+	routes, err := buildRoutes()
+	if err != nil {
+		return err
+	}
+
 	srv := &http.Server{
-		Handler:           buildHandler(handler.NewRouter(), logger),
+		Handler:           buildHandler(routes, logger),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
@@ -75,6 +80,14 @@ func run(ctx context.Context, getenv func(string) string, logger *slog.Logger) e
 	}
 	logger.Info("サーバーを停止した")
 	return nil
+}
+
+// buildRoutes は、全ルートを登録して http.Handler に組み上げる。
+// 認証つきのルートは、認証と UserService の配線ができてから足す。
+func buildRoutes() (http.Handler, error) {
+	r := handler.NewRouter()
+	r.Public("GET /healthz", http.HandlerFunc(handler.Healthz))
+	return r.Handler()
 }
 
 // buildHandler は、共通ミドルウェアを RequestID → Logging → Recover の順(外側から)で inner に被せる。
