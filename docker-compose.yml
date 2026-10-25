@@ -68,7 +68,8 @@ services:
       SLOTRES_USER2_PASSWORD: ${SLOTRES_USER2_PASSWORD:?.env に SLOTRES_USER2_PASSWORD を書くこと}
       SLOTRES_ADMIN1_PASSWORD: ${SLOTRES_ADMIN1_PASSWORD:?.env に SLOTRES_ADMIN1_PASSWORD を書くこと}
     ports:
-      - "8081:8080"
+      # 開発用の管理コンソールを LAN に晒さぬよう、mysql と同じく 127.0.0.1 のみに公開する。
+      - "127.0.0.1:8081:8080"
     volumes:
       - ./docker/keycloak/slotres-realm.json:/opt/keycloak/data/import/slotres-realm.json:ro
     healthcheck:
@@ -108,7 +109,7 @@ services:
       APP_KEYCLOAK_JWKS_URL: ${APP_KEYCLOAK_JWKS_URL:?.env に APP_KEYCLOAK_JWKS_URL を書くこと}
       APP_JWT_AUDIENCE: ${APP_JWT_AUDIENCE:?.env に APP_JWT_AUDIENCE を書くこと}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 10s
