@@ -1,0 +1,123 @@
+### 枠予約API 動作確認用(VS Code REST Client)
+#
+# 使い方: 先に `docker compose up -d` で API・MySQL・Keycloak を起動し、
+# リポジトリ直下の .env に SLOTRES_USER1_PASSWORD・SLOTRES_ADMIN1_PASSWORD を書いておく。
+# パスワードは {{$dotenv ...}} で .env から読むので、このファイルに値は書かない。
+# 上から順に送る。createSlot の応答の id を後続の {id} に使う。
+# 管理者の操作は adminToken、利用者の操作は userToken で呼び分ける。
+
+@host = http://localhost:8080
+@kc = http://localhost:8081
+
+### 1. 死活確認(認証なし)
+GET {{host}}/healthz
+
+### 2. 管理者のトークン取得(Keycloak / realm slotres / slot-api-client)
+# @name adminToken
+POST {{kc}}/realms/slotres/protocol/openid-connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=password&client_id=slot-api-client&username=admin1&password={{$dotenv SLOTRES_ADMIN1_PASSWORD}}
+
+### 3. 利用者のトークン取得
+# @name userToken
+POST {{kc}}/realms/slotres/protocol/openid-connect/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=password&client_id=slot-api-client&username=user1&password={{$dotenv SLOTRES_USER1_PASSWORD}}
+
+### 4. 枠を作成(管理者・下書きで作られる。日時は +09:00 のオフセット付き)
+# @name createSlot
+POST {{host}}/slots
+Authorization: Bearer {{adminToken.response.body.access_token}}
+Content-Type: application/json
+
+{
+  "title": "午前の部屋A",
+  "capacity": 4,
+  "startAt": "2026-11-01T10:00:00+09:00",
+  "endAt": "2026-11-01T12:00:00+09:00",
+  "reservationDeadlineAt": "2026-10-31T18:00:00+09:00"
+}
+
+### 5. 枠の一覧(利用者: 公開中かつ締切前の枠だけ / 管理者: 全状態)
+GET {{host}}/slots?from=2026-11-01T00:00:00%2B09:00&to=2026-11-02T00:00:00%2B09:00&availableOnly=true&limit=20&offset=0
+Authorization: Bearer {{userToken.response.body.access_token}}
+
+### 6. 枠の一覧(管理者: 状態で絞り込み)
+GET {{host}}/slots?status=draft&limit=20&offset=0
+Authorization: Bearer {{adminToken.response.body.access_token}}
+
+### 7. 枠の詳細
+GET {{host}}/slots/{{createSlot.response.body.id}}
+Authorization: Bearer {{userToken.response.body.access_token}}
+
+### 8. 枠の変更(管理者・送った項目だけ変わる)
+PATCH {{host}}/slots/{{createSlot.response.body.id}}
+Authorization: Bearer {{adminToken.response.body.access_token}}
+Content-Type: application/json
+
+{
+  "title": "午前の部屋A(改)",
+  "capacity": 6
+}
+
+### 9. 枠の公開(管理者・204)
+POST {{host}}/slots/{{createSlot.response.body.id}}/publish
+Authorization: Bearer {{adminToken.response.body.access_token}}
+
+### 10. 枠を閉じる(管理者・204)
+POST {{host}}/slots/{{createSlot.response.body.id}}/close
+Authorization: Bearer {{adminToken.response.body.access_token}}
+
+### 11. 枠の削除(管理者・204。予約が一度でも入った枠は 422)
+DELETE {{host}}/slots/{{createSlot.response.body.id}}
+Authorization: Bearer {{adminToken.response.body.access_token}}
+
+### 12. 予約(利用者)— 工程D時点では 501 を返す(殿が実装する)
+POST {{host}}/slots/{{createSlot.response.body.id}}/reservations
+Authorization: Bearer {{userToken.response.body.access_token}}
+
+### --- 失敗例 ---
+
+### F1. トークン無し → 401
+GET {{host}}/slots
+
+### F2. 利用者が枠を作成 → 403
+POST {{host}}/slots
+Authorization: Bearer {{userToken.response.body.access_token}}
+Content-Type: application/json
+
+{
+  "title": "利用者は作れない",
+  "capacity": 4,
+  "startAt": "2026-11-01T10:00:00+09:00",
+  "endAt": "2026-11-01T12:00:00+09:00",
+  "reservationDeadlineAt": "2026-10-31T18:00:00+09:00"
+}
+
+### F3. 不正な本文(title 空・capacity 0)→ 400
+POST {{host}}/slots
+Authorization: Bearer {{adminToken.response.body.access_token}}
+Content-Type: application/json
+
+{
+  "title": "",
+  "capacity": 0,
+  "startAt": "2026-11-01T10:00:00+09:00",
+  "endAt": "2026-11-01T12:00:00+09:00",
+  "reservationDeadlineAt": "2026-10-31T18:00:00+09:00"
+}
+
+### F4. 日時にオフセットが無い → 400
+POST {{host}}/slots
+Authorization: Bearer {{adminToken.response.body.access_token}}
+Content-Type: application/json
+
+{
+  "title": "オフセット無し",
+  "capacity": 4,
+  "startAt": "2026-11-01T10:00:00",
+  "endAt": "2026-11-01T12:00:00+09:00",
+  "reservationDeadlineAt": "2026-10-31T18:00:00+09:00"
+}
