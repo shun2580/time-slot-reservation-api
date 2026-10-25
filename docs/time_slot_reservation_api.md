@@ -348,5 +348,31 @@ Go のバックエンド開発力(レイヤー設計・SQL・トランザクシ�
 | 管理者向けの予約一覧では、利用者を Keycloak の利用者ID(sub)で示す | users には API で見せる ID がなく、メールアドレスも持たないため |
 | 管理者が予約・自分の予約一覧を呼んだら 403 | 管理者は予約しない前提と合わせる |
 
+## 実装時の解釈
+仕様の曖昧な点を、第1段階の実装でどう読むかを決めた記録。R1・R4 は殿の裁定、他は将軍の裁定(S-30)で、軍師の推奨に従った。仕様と食い違うものではなく、読み方を決めたものである。
+
+| ID | 論点 | 実装時の解釈 | 決定者 |
+|----|------|--------------|--------|
+| R1 | 「予約が入っている」の範囲(枠の変更・削除・閉じる) | 「予約が入っている」は、取消済みを含む全状態の予約行が1つでもあることを指す。削除の基準(一度も入っていない)と同じ基準にそろい、外部キーの RESTRICT とも向きが揃う。 | 殿(2026-10-25) |
+| R2 | PATCH /slots/{id} の部分更新の本文の定め | 予約がある枠では、title・startAt・endAt のいずれかが本文にあれば 422 update-not-allowed とする。capacity・reservationDeadlineAt は現在値以上なら可(同値は無変更として通す)で、現在値より小さければ 422 とする。予約がない枠では全項目を変更できる。未知の項目は DisallowUnknownFields で 400 validation-error とする。null は 400 とする。 | 将軍(S-30) |
+| R3 | 部分更新後の項目間の整合(start<end、deadline<=start) | 現在値と本文をマージした後の値で、FOR UPDATE で枠を取得した後に usecase で検証する。違反は 400 validation-error とし、errors[] に field と message を入れる。DB の CHECK は最後の防壁であり、通常は到達しない。DB の CHECK 違反を 500 で返してはならない。 | 将軍(S-30) |
+| R4 | 枠一覧(GET /slots)の条件と「締切前」の境界 | 全条件は AND で組み合わせる。利用者は、基底条件を「published かつ 現在時刻 < 予約締切」とし、status の指定は無視する。管理者は基底条件なしで、status で絞れる。availableOnly=true は両者とも「残席>0」だけを足す(状態や締切は別軸)。from は start_at >= 、to は start_at < で比べる。日付のみは受けず date-time のみとする。from が to より後なら 400 とする。予約できるのは現在時刻 < 予約締切のときのみで、締切ちょうどは締切後とする。予約の判定(殿が書く部分)もこの境界に合わせる。 | 殿(2026-10-25) |
+| R5 | remaining の式・型 | remaining = capacity − COUNT(status='active')。整数・非 null・0 以上(PATCH が減員を許さないので負にならない)。draft・closed や締切後の枠でも同じ式とする(予約できるかは status と締切の別軸)。作成直後は capacity と同じ。一覧は LEFT JOIN の集計1本で出し、N+1 にしない。 | 将軍(S-30) |
+| R6 | 業務エラー以外の Problem Details の type | RFC 9457 の既定 about:blank とし、title は HTTP の理由句とする。400 は入力の誤りすべて(JSON 破損・不正パラメータを含む)を /problems/validation-error に統一する。ServeMux で一致しないパスは 404、パスは一致するがメソッドが不一致なら 405 と Allow ヘッダを、いずれも Problem Details で返す(ラッパを置く)。401 には WWW-Authenticate: Bearer を付ける。新しい type URI は作らない。 | 将軍(S-30) |
+| R7 | ロールの置場とロールなしの扱い | realm ロール admin を、トークンの realm_access.roles から読む。admin がなければ利用者とする。realm_access が無い、または空のトークンは認証は通り(401 にしない)、管理者専用の操作で 403 とする。利用者用の別ロールは作らない。 | 将軍(S-30) |
+| R8 | aud の期待値 | aud=slot-api とし、Keycloak 側は audience mapper で載せ、API は APP_JWT_AUDIENCE で照合する。 | 将軍(S-30) |
+| R9 | JWT の検証と JWKS | issuer と JWKS URL は別の設定にする。JWT の検証は、kid で鍵を引き、use=sig かつ alg=RS256 の鍵だけを受ける(enc 鍵、および RS256 以外の alg では通らない)。署名・iss・aud・exp を検証する。JWKS を取れず検証不能なら 503、署名・iss・aud・exp の不正および未知の kid は 401 とする。起動時は Keycloak が未起動でも落とさず、遅延取得する。 | 将軍(S-30) |
+| R10 | 初回アクセスでの users 行の作成 | UNIQUE(keycloak_sub) に任せる。INSERT ... ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)、または INSERT IGNORE の後に SELECT で、競合しても同じ行 id を得る(SELECT の後に INSERT する二段にしない)。時刻はアプリが JST で明示的に入れる。認証済みの全リクエスト(管理者・501 ルートを含み、healthz を除く)で行う。2回目以降は updated_at を更新しない。middleware は repository を直接触らず、usecase のインターフェース経由で行う。 | 将軍(S-30) |
+| R11 | エラーの優先順位と不正な {id} | 401(トークン)→ 403(ロール。DB を引かず usecase の冒頭)→ 400(本文・クエリの形式検証)→ 404(対象なし、利用者に見せない下書き)→ FOR UPDATE の後に 409/422 の順とする。path の {id} が UUID でなければ「存在しない」として 404 とする。 | 将軍(S-30) |
+| R12 | 日時のオフセットと小数秒 | RFC 3339 でオフセットを持つ値は任意のオフセットで受け、Asia/Tokyo に換算して保存・返却する(返却は常に +09:00)。オフセットなしは 400 とする。小数秒は Go で Truncate(time.Second) してから検証・保存する(丸めに任せると、deadline<=start の検証と DB の値がずれうる)。過去日時の検査は仕様にないので足さない。tzdata は time/tzdata の取り込みで足りる。 | 将軍(S-30) |
+| R13 | 公開(draft→published)のロック | 公開でも枠の行を FOR UPDATE でロックしてから状態を確かめる(他の遷移とそろえ、ロック順を統一する)。 | 将軍(S-30) |
+| R14 | 第1段階の試験の範囲(業務エラー) | 枠の4種を各1件以上: 409 slot-has-active-reservations、422 slot-has-reservation-history・invalid-state-transition・update-not-allowed。予約行は testcontainers の中で SQL で直接挿入して前提を作る(予約の usecase はない)。予約系の6種(capacity-exceeded・already-reserved・reservation-deadline-passed・cancellation-deadline-passed・rebooking-not-allowed・slot-not-reservable)は殿が書く部分として対象外とする。 | 将軍(S-30) |
+| R15 | .http の範囲 | 枠系の7本 + healthz + トークン取得(Keycloak のトークン endpoint を slot-api-client の directAccessGrants で)。予約系は 501 の確認例を1つずつ付けてもよいが必須にしない。パスワードは .env の値を参照し、.http に直書きしない。 | 将軍(S-30) |
+| R16 | 一覧の並びと limit・offset | ORDER BY start_at ASC, id ASC とする。limit が範囲外・非整数、または offset が負なら 400 とする(openapi.yaml の schema どおり)。応答の limit・offset は実効値(既定は 20 と 0)。 | 将軍(S-30) |
+| R17 | 501 ルートと認証の前後 | 認証 middleware は healthz 以外の全ルートに掛け、未認証は 401 を先に返す。認証済みなら役割に関係なく 501(about:blank、title は Not Implemented)を返す。管理者の取消が仕様の 403 でなく 501 になる件は、指示どおりで矛盾として扱わない。 | 将軍(S-30) |
+
+- 第1段階では POST /reservations/{id}/cancel などの予約系ルートは、登録のみで 501 Not Implemented を Problem Details で返す(殿が実装する)。仕様書の「管理者が呼んだら 403」は殿が取消を実装するときに入れる。(殿の裁可 2026-10-25)
+- Problem Details の errors[](field・message)は validation-error のときに返す。パス一致でメソッド不一致は 405 と Allow ヘッダを Problem Details で返す。(殿の指示 2026-10-25)
+
 ## 未決
 - なし
