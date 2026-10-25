@@ -1,0 +1,19 @@
+# <type>: <description>
+#
+# type:
+#   feat     add a feature
+#   fix      fix a bug
+#   test     add or update tests
+#   docs     update README or specs
+#   refactor change code without changing behavior
+#   chore    other maintenance
+#
+# description:
+#   - English, imperative mood (add / fix / update)
+#   - start with a lowercase letter
+#   - no trailing period
+#   - within 72 characters
+#
+# e.g. feat: add reservation usecase
+#      fix: return 404 for draft slots
+#      docs: add progress to README
