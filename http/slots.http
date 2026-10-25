@@ -1,8 +1,13 @@
 ### 枠予約API 動作確認用(VS Code REST Client)
 #
-# 使い方: 先に `docker compose up -d` で API・MySQL・Keycloak を起動し、
-# リポジトリ直下の .env に SLOTRES_USER1_PASSWORD・SLOTRES_ADMIN1_PASSWORD を書いておく。
-# パスワードは {{$dotenv ...}} で .env から読むので、このファイルに値は書かない。
+# 使い方: 先に `docker compose up -d` で API・MySQL・Keycloak を起動する。
+# 値の置場: リポジトリ直下の .env に SLOTRES_USER1_PASSWORD・SLOTRES_ADMIN1_PASSWORD を書く。
+#   このファイルには値を書かない。
+# 読ませ方: {{$dotenv ...}} は、この .http と同じ場所の .env を読む。そこで http/.env を
+#   シンボリックリンクで用意する(http/.env は .gitignore の .env 規則で追跡外)。
+#   ln -s ../.env http/.env
+# トークン寿命は 300 秒。5分を過ぎたら #2(adminToken)と #3(userToken)を再送信してから続ける
+#   (名前付き要求の応答は再送信するまで更新されない)。
 # 上から順に送る。createSlot の応答の id を後続の {id} に使う。
 # 管理者の操作は adminToken、利用者の操作は userToken で呼び分ける。
 
@@ -41,6 +46,7 @@ Content-Type: application/json
 }
 
 ### 5. 枠の一覧(利用者: 公開中かつ締切前の枠だけ / 管理者: 全状態)
+# 下書きのうちは利用者の一覧は空になる。9 の公開の後に送ること。
 GET {{host}}/slots?from=2026-11-01T00:00:00%2B09:00&to=2026-11-02T00:00:00%2B09:00&availableOnly=true&limit=20&offset=0
 Authorization: Bearer {{userToken.response.body.access_token}}
 
@@ -49,6 +55,7 @@ GET {{host}}/slots?status=draft&limit=20&offset=0
 Authorization: Bearer {{adminToken.response.body.access_token}}
 
 ### 7. 枠の詳細
+# 下書きのうちは利用者には 404 になる。9 の公開の後に送ること。
 GET {{host}}/slots/{{createSlot.response.body.id}}
 Authorization: Bearer {{userToken.response.body.access_token}}
 
