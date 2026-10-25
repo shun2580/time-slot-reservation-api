@@ -1,0 +1,28 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+go.work
+go.work.sum
+
+# 環境変数(.env.example だけ追跡する)
+.env
+.env.*
+!.env.example
+
+# IDE・OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# ビルド・一時
+bin/
+tmp/

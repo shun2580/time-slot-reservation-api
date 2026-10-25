@@ -1,0 +1,639 @@
+openapi: 3.1.0
+info:
+  title: 枠予約API
+  version: 0.1.0
+  description: |
+    定員制のシェアスペースの時間枠を予約するAPI(第1段階)。
+
+    - 認証:Keycloak が発行した JWT(Bearer)。管理者かどうかはトークンのロールで判定する
+    - 日時:RFC 3339 形式、JST(+09:00)で返す。受け取るときもオフセット付きで受け付ける
+    - ID:API で扱う ID はすべて UUID(v4)
+    - エラー:RFC 9457(Problem Details)。`type` で業務エラーの種類を区別する
+
+    ## 業務エラーの種類(type)
+    | type | status | 意味 |
+    |---|---|---|
+    | /problems/capacity-exceeded | 409 | 定員超過 |
+    | /problems/already-reserved | 409 | 同じ利用者の重複予約 |
+    | /problems/slot-has-active-reservations | 409 | 有効な予約がある枠を閉じようとした |
+    | /problems/reservation-deadline-passed | 422 | 締切後の予約 |
+    | /problems/cancellation-deadline-passed | 422 | 取消期限(開始の24時間前)を過ぎた |
+    | /problems/rebooking-not-allowed | 422 | 代理取消された枠の再予約 |
+    | /problems/slot-not-reservable | 422 | 閉じた枠への予約 |
+    | /problems/slot-has-reservation-history | 422 | 予約が一度でも入った枠の削除 |
+    | /problems/invalid-state-transition | 422 | 状態遷移として許されない操作(下書き以外の公開、公開以外を閉じる、閉じた枠の変更、取消済みの予約の取消など) |
+    | /problems/update-not-allowed | 422 | 予約がある枠で、定員の増加と締切の延長以外を変更しようとした |
+    | /problems/validation-error | 400 | 入力の誤り |
+
+    第1段階では、管理者が `POST /reservations/{id}/cancel` を呼ぶと 403 を返す(代理取消は第2段階)。
+
+servers:
+  - url: http://localhost:8080
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: slots
+    description: 枠
+  - name: reservations
+    description: 予約
+  - name: ops
+    description: 運用
+
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      tags: [ops]
+      summary: 死活確認
+      security: []
+      responses:
+        "200":
+          description: 稼働中
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+
+  /slots:
+    get:
+      operationId: listSlots
+      tags: [slots]
+      summary: 枠の一覧
+      description: |
+        利用者には公開中かつ締切前の枠だけを返す。管理者には全状態の枠を返す。
+        並び順は開始日時の昇順。
+      parameters:
+        - name: from
+          in: query
+          description: 開始日時がこの日時以降の枠
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: 開始日時がこの日時より前の枠
+          schema:
+            type: string
+            format: date-time
+        - name: availableOnly
+          in: query
+          description: true なら空きがある枠だけ
+          schema:
+            type: boolean
+            default: false
+        - name: status
+          in: query
+          description: 状態で絞り込む(管理者のみ。利用者が指定したら無視する)
+          schema:
+            $ref: "#/components/schemas/SlotStatus"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SlotList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createSlot
+      tags: [slots]
+      summary: 枠の作成(管理者)
+      description: 下書きとして作成する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SlotCreate"
+      responses:
+        "201":
+          description: 作成した
+          headers:
+            Location:
+              description: 作成した枠の URL
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Slot"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /slots/{slotId}:
+    parameters:
+      - $ref: "#/components/parameters/SlotId"
+    get:
+      operationId: getSlot
+      tags: [slots]
+      summary: 枠の詳細
+      description: 利用者が下書きの枠を指定したら 404。
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Slot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      operationId: updateSlot
+      tags: [slots]
+      summary: 枠の変更(管理者)
+      description: |
+        下書き・公開中の枠のみ変更できる。
+        予約が入っていない枠は全項目を変更できる。予約が入っている枠は、定員の増加と締切の延長のみ可。
+        送った項目だけを変更する。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SlotUpdate"
+      responses:
+        "204":
+          description: 変更した
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+    delete:
+      operationId: deleteSlot
+      tags: [slots]
+      summary: 枠の削除(管理者)
+      description: 予約が一度も入っていない枠だけ削除できる(状態は問わない)。
+      responses:
+        "204":
+          description: 削除した
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+
+  /slots/{slotId}/publish:
+    parameters:
+      - $ref: "#/components/parameters/SlotId"
+    post:
+      operationId: publishSlot
+      tags: [slots]
+      summary: 枠の公開(管理者)
+      description: 下書き → 公開。
+      responses:
+        "204":
+          description: 公開した
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+
+  /slots/{slotId}/close:
+    parameters:
+      - $ref: "#/components/parameters/SlotId"
+    post:
+      operationId: closeSlot
+      tags: [slots]
+      summary: 枠を閉じる(管理者)
+      description: 公開 → 閉じた。有効な予約がある枠は閉じられない(409)。閉じた枠は再び開けられない。
+      responses:
+        "204":
+          description: 閉じた
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+
+  /slots/{slotId}/reservations:
+    parameters:
+      - $ref: "#/components/parameters/SlotId"
+    get:
+      operationId: listSlotReservations
+      tags: [reservations]
+      summary: 枠の予約一覧(管理者)
+      description: 全状態の予約を返す。並び順は作成日時の昇順。
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminReservationList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      operationId: createReservation
+      tags: [reservations]
+      summary: 予約(利用者)
+      description: |
+        公開中・締切前・定員未満の枠に予約する。
+        本人取消した枠への予約は、取り消し済みの予約を有効に戻す(再予約)。新規・再予約とも 201 を返す。
+        管理者が呼んだら 403。
+      responses:
+        "201":
+          description: 予約した
+          headers:
+            Location:
+              description: 予約の URL
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Reservation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+
+  /reservations:
+    get:
+      operationId: listMyReservations
+      tags: [reservations]
+      summary: 自分の予約一覧(利用者)
+      description: 全状態の自分の予約を返す。並び順は枠の開始日時の降順。管理者が呼んだら 403。
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReservationList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /reservations/{reservationId}:
+    parameters:
+      - $ref: "#/components/parameters/ReservationId"
+    get:
+      operationId: getReservation
+      tags: [reservations]
+      summary: 予約の詳細
+      description: 利用者が他人の予約を指定したら 404。
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Reservation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /reservations/{reservationId}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/ReservationId"
+    post:
+      operationId: cancelReservation
+      tags: [reservations]
+      summary: 予約の取消
+      description: |
+        利用者が呼ぶと本人取消(開始の24時間前まで)。
+        管理者が呼ぶと代理取消(第2段階で実装。第1段階では 403)。
+        利用者が他人の予約を指定したら 404。
+      responses:
+        "204":
+          description: 取り消した
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableContent"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    SlotId:
+      name: slotId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ReservationId:
+      name: reservationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  schemas:
+    SlotStatus:
+      type: string
+      enum: [draft, published, closed]
+
+    ReservationStatus:
+      type: string
+      enum: [active, cancelled_by_user, cancelled_by_admin]
+
+    Slot:
+      type: object
+      required: [id, title, capacity, remaining, startAt, endAt, reservationDeadlineAt, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          maxLength: 100
+        capacity:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        remaining:
+          type: integer
+          minimum: 0
+          description: 残りの席数(定員 − 有効な予約の数)
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        reservationDeadlineAt:
+          type: string
+          format: date-time
+        status:
+          $ref: "#/components/schemas/SlotStatus"
+
+    SlotCreate:
+      type: object
+      required: [title, capacity, startAt, endAt, reservationDeadlineAt]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 100
+        capacity:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+          description: startAt より後
+        reservationDeadlineAt:
+          type: string
+          format: date-time
+          description: startAt 以前
+
+    SlotUpdate:
+      type: object
+      minProperties: 1
+      description: 送った項目だけを変更する。予約がある枠では capacity(増加のみ)と reservationDeadlineAt(延長のみ)だけ送れる。
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 100
+        capacity:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        reservationDeadlineAt:
+          type: string
+          format: date-time
+
+    SlotList:
+      type: object
+      required: [items, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Slot"
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    SlotSummary:
+      type: object
+      required: [id, title, startAt, endAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+
+    Reservation:
+      type: object
+      required: [id, slot, status, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        slot:
+          $ref: "#/components/schemas/SlotSummary"
+        status:
+          $ref: "#/components/schemas/ReservationStatus"
+        createdAt:
+          type: string
+          format: date-time
+          description: 予約した日時(再予約の場合は再予約した日時)
+
+    ReservationList:
+      type: object
+      required: [items, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Reservation"
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    AdminReservation:
+      type: object
+      required: [id, userId, status, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          description: 予約した利用者の Keycloak の利用者ID(sub)
+        status:
+          $ref: "#/components/schemas/ReservationStatus"
+        createdAt:
+          type: string
+          format: date-time
+
+    AdminReservationList:
+      type: object
+      required: [items, limit, offset]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminReservation"
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+        errors:
+          type: array
+          description: 入力の誤りの詳細(validation-error のときだけ)
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+  responses:
+    BadRequest:
+      description: 入力の誤り
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unauthorized:
+      description: 未認証(トークンがない、または不正)
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Forbidden:
+      description: 権限不足
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotFound:
+      description: 対象が存在しない、または見る権限がない
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: 現在の状態と衝突(状態が変われば成功しうる)
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    UnprocessableContent:
+      description: 規則に反する(送り直しても成功しない)
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
